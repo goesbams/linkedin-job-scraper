@@ -1,0 +1,75 @@
+# Indonesian Common Name Patterns
+# Balinese Names
+Kadek
+Ketut
+Komang
+Made
+Nyoman
+Putu
+Wayan
+Gede
+# Javanese Names
+Bambang
+Budi
+Dwi
+Eko
+Endang
+Heru
+Joko
+Rini
+Sari
+Sri
+Sukamto
+Tri
+# Sundanese Names
+Asep
+Dedi
+Iin
+Neng
+Teteh
+# Batak Names
+Hotma
+Juntak
+Nababan
+Panggabean
+Pardede
+Purba
+Siagian
+Siahaan
+Simanjuntak
+Sinaga
+Siregar
+Situmeang
+Situmorang
+Tambunan
+# Minang Names
+Sutan
+Tengku
+# Betawi Names
+Mpok
+Nyai
+# Generic Indonesian Patterns
+Abdur
+Ainul
+Amal
+Amin
+Bahar
+Bening
+Cahya
+Darul
+Fajar
+Fitri
+Hadir
+Indah
+Jati
+Kasih
+Lestari
+Mulia
+Nur
+Putih
+Rahmat
+Sakti
+Suci
+Tulus
+Utami
+Wening
