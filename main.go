@@ -12,8 +12,8 @@ import (
 	"strings"
 	"time"
 
-	"./names" // Import our names package
 	"github.com/PuerkitoBio/goquery"
+	"github.com/goesbams/linkedin-job-scraper/names"
 )
 
 // Job represents a job posting
@@ -37,14 +37,15 @@ type Employee struct {
 	Confidence   float64  `json:"confidence"`
 }
 
-// LinkedInScraper handles the scraping logic with efficient name detection
+// LinkedInScraper handles the scraping logic with enhanced debugging
 type LinkedInScraper struct {
 	client *http.Client
 	delay  time.Duration
 	nameDB *names.NameDB
+	debug  bool
 }
 
-// NewLinkedInScraper creates a new scraper instance
+// NewLinkedInScraper creates a new scraper instance with debug mode
 func NewLinkedInScraper() (*LinkedInScraper, error) {
 	// Initialize the Indonesian names database
 	nameDB, err := names.NewNameDB()
@@ -56,35 +57,37 @@ func NewLinkedInScraper() (*LinkedInScraper, error) {
 	stats := nameDB.GetStats()
 	log.Printf("Loaded Indonesian names database: %+v", stats)
 
+	// Check for debug mode
+	debug := os.Getenv("DEBUG") == "true" || os.Getenv("SCRAPER_DEBUG") == "true"
+
 	return &LinkedInScraper{
 		client: &http.Client{
 			Timeout: 30 * time.Second,
 		},
-		delay:  2 * time.Second,
+		delay:  3 * time.Second, // Increased delay to be more respectful
 		nameDB: nameDB,
+		debug:  debug,
 	}, nil
 }
 
-// makeRequest makes an HTTP request with proper headers and user agent rotation
+// debugLog prints debug information if debug mode is enabled
+func (s *LinkedInScraper) debugLog(format string, args ...interface{}) {
+	if s.debug {
+		log.Printf("[DEBUG] "+format, args...)
+	}
+}
+
+// makeRequest makes an HTTP request with enhanced headers and debugging
 func (s *LinkedInScraper) makeRequest(url string) (*http.Response, error) {
 	req, err := http.NewRequest("GET", url, nil)
 	if err != nil {
 		return nil, err
 	}
 
-	// Rotate user agents for better stealth
-	userAgents := []string{
-		"Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-		"Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-		"Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-		"Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:121.0) Gecko/20100101 Firefox/121.0",
-		"Mozilla/5.0 (Macintosh; Intel Mac OS X 10.15; rv:121.0) Gecko/20100101 Firefox/121.0",
-	}
-
-	ua := userAgents[time.Now().UnixNano()%int64(len(userAgents))]
-	req.Header.Set("User-Agent", ua)
-	req.Header.Set("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8")
-	req.Header.Set("Accept-Language", "en-US,en;q=0.7,id;q=0.3")
+	// Enhanced headers to appear more like a real browser
+	req.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
+	req.Header.Set("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8")
+	req.Header.Set("Accept-Language", "en-US,en;q=0.9")
 	req.Header.Set("Accept-Encoding", "gzip, deflate, br")
 	req.Header.Set("Connection", "keep-alive")
 	req.Header.Set("Upgrade-Insecure-Requests", "1")
@@ -92,46 +95,151 @@ func (s *LinkedInScraper) makeRequest(url string) (*http.Response, error) {
 	req.Header.Set("Sec-Fetch-Mode", "navigate")
 	req.Header.Set("Sec-Fetch-Site", "none")
 	req.Header.Set("Cache-Control", "max-age=0")
+	req.Header.Set("DNT", "1")
 
-	return s.client.Do(req)
+	s.debugLog("Making request to: %s", url)
+
+	resp, err := s.client.Do(req)
+	if err != nil {
+		return nil, err
+	}
+
+	s.debugLog("Response status: %d %s", resp.StatusCode, resp.Status)
+
+	return resp, nil
 }
 
-// SearchJobs searches for jobs in LinkedIn with improved parsing
+// testLinkedInAccess tests if LinkedIn is accessible and not blocking us
+func (s *LinkedInScraper) testLinkedInAccess() error {
+	testURL := "https://www.linkedin.com"
+	s.debugLog("Testing LinkedIn access...")
+
+	resp, err := s.makeRequest(testURL)
+	if err != nil {
+		return fmt.Errorf("failed to access LinkedIn: %v", err)
+	}
+	defer resp.Body.Close()
+
+	s.debugLog("LinkedIn access test: %d %s", resp.StatusCode, resp.Status)
+
+	if resp.StatusCode == 999 {
+		return fmt.Errorf("LinkedIn is blocking requests (status 999) - try using VPN or different IP")
+	}
+
+	if resp.StatusCode != 200 {
+		return fmt.Errorf("LinkedIn returned status %d - may be blocking requests", resp.StatusCode)
+	}
+
+	return nil
+}
+
+// SearchJobs searches for jobs with enhanced debugging and multiple fallback strategies
 func (s *LinkedInScraper) SearchJobs(country, jobTitle string, limit int) ([]Job, error) {
+	// Test LinkedIn access first
+	if err := s.testLinkedInAccess(); err != nil {
+		log.Printf("⚠️  Warning: %v", err)
+	}
+
 	baseURL := "https://www.linkedin.com/jobs/search"
 
 	var allJobs []Job
 	start := 0
 
 	for len(allJobs) < limit {
-		params := url.Values{}
-		params.Add("keywords", jobTitle)
-		params.Add("location", country)
-		params.Add("f_TPR", "r604800") // Jobs posted in last week
-		params.Add("start", fmt.Sprintf("%d", start))
-		params.Add("sortBy", "R") // Most recent first
-
-		searchURL := fmt.Sprintf("%s?%s", baseURL, params.Encode())
-		log.Printf("Searching jobs (page %d): %s", start/25+1, searchURL)
-
-		resp, err := s.makeRequest(searchURL)
-		if err != nil {
-			return nil, fmt.Errorf("failed to make search request: %v", err)
+		// Try multiple parameter combinations for better success rate
+		paramSets := []url.Values{
+			// Original parameters with time filter
+			{
+				"keywords": {jobTitle},
+				"location": {country},
+				"f_TPR":    {"r604800"}, // Last week
+				"start":    {fmt.Sprintf("%d", start)},
+				"sortBy":   {"R"},
+			},
+			// Without time restriction (more results)
+			{
+				"keywords": {jobTitle},
+				"location": {country},
+				"start":    {fmt.Sprintf("%d", start)},
+				"sortBy":   {"R"},
+			},
+			// Simple parameters
+			{
+				"keywords": {jobTitle},
+				"location": {country},
+				"start":    {fmt.Sprintf("%d", start)},
+			},
+			// Most basic approach
+			{
+				"keywords": {jobTitle},
+				"location": {country},
+			},
 		}
-		defer resp.Body.Close()
 
-		if resp.StatusCode != 200 {
-			return nil, fmt.Errorf("search request failed with status: %d", resp.StatusCode)
+		var pageJobs []Job
+
+		// Try each parameter set until one works
+		for i, params := range paramSets {
+			searchURL := fmt.Sprintf("%s?%s", baseURL, params.Encode())
+
+			if i == 0 {
+				log.Printf("🔍 Searching jobs (page %d): %s", start/25+1, searchURL)
+			} else {
+				s.debugLog("Trying fallback approach %d: %s", i+1, searchURL)
+			}
+
+			resp, err := s.makeRequest(searchURL)
+			if err != nil {
+				s.debugLog("Request failed for approach %d: %v", i+1, err)
+				continue
+			}
+			defer resp.Body.Close()
+
+			if resp.StatusCode == 999 {
+				return nil, fmt.Errorf("LinkedIn is blocking requests (status 999). Try:\n1. Using a VPN\n2. Waiting and trying later\n3. Using different search terms")
+			}
+
+			if resp.StatusCode != 200 {
+				s.debugLog("Non-200 response for approach %d: %d", i+1, resp.StatusCode)
+				continue
+			}
+
+			doc, err := goquery.NewDocumentFromReader(resp.Body)
+			if err != nil {
+				s.debugLog("Parse failed for approach %d: %v", i+1, err)
+				continue
+			}
+
+			// Debug: save page content if in debug mode
+			if s.debug {
+				html, _ := doc.Html()
+				filename := fmt.Sprintf("debug_approach_%d_page_%d.html", i+1, start/25+1)
+				os.WriteFile(filename, []byte(html), 0644)
+				s.debugLog("Saved debug page to: %s", filename)
+			}
+
+			jobs := s.extractJobsFromDocument(doc)
+			s.debugLog("Approach %d extracted %d jobs from page %d", i+1, len(jobs), start/25+1)
+
+			if len(jobs) > 0 {
+				pageJobs = jobs
+				if i > 0 {
+					log.Printf("✅ Success with fallback approach %d - found %d jobs", i+1, len(jobs))
+				}
+				break // Found jobs, use this approach
+			}
 		}
 
-		doc, err := goquery.NewDocumentFromReader(resp.Body)
-		if err != nil {
-			return nil, fmt.Errorf("failed to parse HTML: %v", err)
-		}
-
-		pageJobs := s.extractJobsFromDocument(doc)
 		if len(pageJobs) == 0 {
-			log.Printf("No more jobs found on page %d", start/25+1)
+			s.debugLog("No jobs found with any approach on page %d", start/25+1)
+
+			// Enhanced blocking detection
+			if start == 0 { // Only check on first page
+				log.Printf("🔍 Analyzing why no jobs were found...")
+				// The debug files will contain the actual page content for analysis
+			}
+
+			log.Printf("ℹ️  No more jobs found on page %d", start/25+1)
 			break
 		}
 
@@ -143,93 +251,260 @@ func (s *LinkedInScraper) SearchJobs(country, jobTitle string, limit int) ([]Job
 		}
 
 		start += 25
+
+		s.debugLog("Waiting %v before next request...", s.delay)
 		time.Sleep(s.delay)
 	}
 
-	log.Printf("Found %d jobs total", len(allJobs))
+	log.Printf("✅ Found %d jobs total", len(allJobs))
 	return allJobs, nil
 }
 
-// extractJobsFromDocument extracts job listings from HTML document
+// extractJobsFromDocument extracts job listings with comprehensive selector fallbacks
 func (s *LinkedInScraper) extractJobsFromDocument(doc *goquery.Document) []Job {
 	var jobs []Job
 
-	// Try multiple selectors for job cards
+	// Comprehensive list of selectors for different LinkedIn page versions
 	selectors := []string{
+		// Current known selectors
 		".job-search-card",
 		".jobs-search__results-list li",
 		"[data-entity-urn*='jobPosting']",
 		".job-result-card",
+		".base-card",
+		"li[data-occludable-job-id]",
+		".scaffold-layout__list-container li",
+
+		// Additional selectors for newer LinkedIn versions
+		".jobs-search-results__list-item",
+		".job-card-container",
+		".job-card-search",
+		"[data-job-id]",
+		"[data-tracking-control-name='job_search_job_result']",
+		".artdeco-entity-lockup",
+		".job-card-square",
+		".jobs-search__job-card",
+		".jobs-unified-top-card",
+		".job-search-result-card",
+
+		// LinkedIn mobile/responsive selectors
+		".jobs-search-box",
+		".jobs-search-results-list",
+		".job-card",
+		".job-result",
+
+		// Generic fallbacks
+		"article",
+		".card",
+		"[data-urn]",
+		"li[data-urn]",
+		"div[class*='job']",
+		"li[class*='job']",
+		"[class*='search-result']",
 	}
 
-	for _, selector := range selectors {
-		doc.Find(selector).Each(func(i int, sel *goquery.Selection) {
-			job := Job{}
+	s.debugLog("Trying %d different selectors for job extraction", len(selectors))
 
-			// Extract job title and URL with multiple fallbacks
-			titleSelectors := []string{
-				".base-search-card__title a",
-				".job-result-card__title a",
-				"h3 a",
-				"[data-control-name='job_search_job_result_title']",
-			}
+	for i, selector := range selectors {
+		s.debugLog("Trying selector %d: %s", i+1, selector)
 
-			for _, titleSel := range titleSelectors {
-				titleLink := sel.Find(titleSel).First()
-				if titleLink.Length() > 0 {
-					job.Title = strings.TrimSpace(titleLink.Text())
-					if href, exists := titleLink.Attr("href"); exists {
-						job.JobURL = s.normalizeURL(href)
-					}
-					break
+		jobElements := doc.Find(selector)
+		s.debugLog("Found %d elements with selector: %s", jobElements.Length(), selector)
+
+		if jobElements.Length() > 0 {
+			var selectorJobs []Job
+			jobElements.Each(func(j int, sel *goquery.Selection) {
+				job := s.extractJobFromElement(sel)
+				if job.Title != "" && job.Company != "" {
+					selectorJobs = append(selectorJobs, job)
+					s.debugLog("Extracted job %d: %s at %s", j+1, job.Title, job.Company)
 				}
-			}
+			})
 
-			// Extract company name and URL
-			companySelectors := []string{
-				".hidden-nested-link",
-				".job-result-card__subtitle a",
-				"h4 a",
-				"[data-control-name='job_search_company_name']",
+			if len(selectorJobs) > 0 {
+				s.debugLog("Successfully extracted %d jobs with selector: %s", len(selectorJobs), selector)
+				jobs = append(jobs, selectorJobs...)
+				break // Found jobs with this selector
 			}
+		}
+	}
 
-			for _, companySel := range companySelectors {
-				companyLink := sel.Find(companySel).First()
-				if companyLink.Length() > 0 {
-					job.Company = strings.TrimSpace(companyLink.Text())
-					if href, exists := companyLink.Attr("href"); exists {
-						job.CompanyURL = s.normalizeURL(href)
-					}
-					break
-				}
-			}
-
-			// Extract location
-			locationSelectors := []string{
-				".job-search-card__location",
-				".job-result-card__location",
-				"[data-test='job-location']",
-			}
-
-			for _, locSel := range locationSelectors {
-				location := sel.Find(locSel).First()
-				if location.Length() > 0 {
-					job.Location = strings.TrimSpace(location.Text())
-					break
-				}
-			}
-
-			if job.Title != "" && job.Company != "" {
-				jobs = append(jobs, job)
-			}
-		})
-
-		if len(jobs) > 0 {
-			break // Found jobs with this selector, no need to try others
+	if len(jobs) == 0 {
+		s.debugLog("⚠️  No jobs extracted with any selector")
+		if s.debug {
+			// Enhanced page structure analysis
+			pageStructure := s.analyzePageStructure(doc)
+			log.Printf("Page structure analysis:\n%s", pageStructure)
 		}
 	}
 
 	return jobs
+}
+
+// extractJobFromElement extracts job details from a single element with enhanced selectors
+func (s *LinkedInScraper) extractJobFromElement(sel *goquery.Selection) Job {
+	job := Job{}
+
+	// Comprehensive title selectors for different LinkedIn layouts
+	titleSelectors := []string{
+		".base-search-card__title a",
+		".job-result-card__title a",
+		"h3 a",
+		"h2 a",
+		"h1 a",
+		"[data-control-name='job_search_job_result_title']",
+		"[data-tracking-control-name='job_search_job_result_title']",
+		".job-search-card__title a",
+		"a[data-control-name='job_search_job_result_title']",
+		".job-card-container__link",
+		".job-card__title a",
+		".artdeco-entity-lockup__title a",
+		".job-title a",
+		"[aria-label*='job']",
+		".jobs-unified-top-card__job-title a",
+		".job-card-container__title a",
+		".job-search-result-card__title a",
+		".jobs-search-box__title a",
+		"a[href*='/jobs/view/']",
+	}
+
+	for _, titleSel := range titleSelectors {
+		titleLink := sel.Find(titleSel).First()
+		if titleLink.Length() > 0 {
+			title := strings.TrimSpace(titleLink.Text())
+			if title != "" && len(title) > 3 { // Basic validation
+				job.Title = title
+				if href, exists := titleLink.Attr("href"); exists {
+					job.JobURL = s.normalizeURL(href)
+				}
+				s.debugLog("Found title with selector %s: %s", titleSel, job.Title)
+				break
+			}
+		}
+	}
+
+	// Comprehensive company selectors
+	companySelectors := []string{
+		".hidden-nested-link",
+		".job-result-card__subtitle a",
+		"h4 a",
+		"[data-control-name='job_search_company_name']",
+		"[data-tracking-control-name='job_search_company_name']",
+		".job-search-card__subtitle a",
+		"a[data-control-name='job_search_company_name']",
+		".job-card-container__company-name a",
+		".job-card__subtitle a",
+		".artdeco-entity-lockup__subtitle a",
+		".company-name a",
+		".jobs-unified-top-card__company-name a",
+		".job-result-card__subtitle-link",
+		".job-card-container__subtitle a",
+		".job-search-result-card__subtitle a",
+		"a[href*='/company/']",
+	}
+
+	for _, companySel := range companySelectors {
+		companyLink := sel.Find(companySel).First()
+		if companyLink.Length() > 0 {
+			company := strings.TrimSpace(companyLink.Text())
+			if company != "" && len(company) > 1 { // Basic validation
+				job.Company = company
+				if href, exists := companyLink.Attr("href"); exists {
+					job.CompanyURL = s.normalizeURL(href)
+				}
+				s.debugLog("Found company with selector %s: %s", companySel, job.Company)
+				break
+			}
+		}
+	}
+
+	// Comprehensive location selectors
+	locationSelectors := []string{
+		".job-search-card__location",
+		".job-result-card__location",
+		"[data-test='job-location']",
+		".job-search-card__location span",
+		".job-card-container__metadata",
+		".job-card__location",
+		".artdeco-entity-lockup__caption",
+		".job-location",
+		".jobs-unified-top-card__bullet",
+		".job-card-container__location",
+		".job-search-result-card__location",
+		".location",
+	}
+
+	for _, locSel := range locationSelectors {
+		location := sel.Find(locSel).First()
+		if location.Length() > 0 {
+			loc := strings.TrimSpace(location.Text())
+			if loc != "" && len(loc) > 2 { // Basic validation
+				job.Location = loc
+				s.debugLog("Found location with selector %s: %s", locSel, job.Location)
+				break
+			}
+		}
+	}
+
+	return job
+}
+
+// analyzePageStructure analyzes the page structure for debugging with enhanced detection
+func (s *LinkedInScraper) analyzePageStructure(doc *goquery.Document) string {
+	var analysis strings.Builder
+
+	analysis.WriteString("=== ENHANCED PAGE STRUCTURE ANALYSIS ===\n")
+
+	// Check for various job-related classes and IDs
+	checkElements := []string{
+		".job-search-card", ".jobs-search__results-list", ".job-result-card",
+		".base-card", ".scaffold-layout__list-container", "[data-entity-urn]",
+		".jobs-search-results__list-item", ".job-card-container", ".job-card-search",
+		"[data-job-id]", ".artdeco-entity-lockup", ".job-card-square",
+		".jobs-search__job-card", ".jobs-unified-top-card", "article", ".card",
+		"[data-urn]", "li[data-urn]", "li", "div[class*='job']", "[class*='search']",
+		"main", "#main", ".main-content", ".content", ".jobs-search",
+	}
+
+	foundElements := 0
+	for _, selector := range checkElements {
+		count := doc.Find(selector).Length()
+		if count > 0 {
+			analysis.WriteString(fmt.Sprintf("✅ Found %d elements with '%s'\n", count, selector))
+			foundElements += count
+		}
+	}
+
+	if foundElements == 0 {
+		analysis.WriteString("❌ No job-related elements found with standard selectors\n")
+	}
+
+	// Check page title and meta info
+	title := doc.Find("title").Text()
+	analysis.WriteString(fmt.Sprintf("📄 Page title: %s\n", strings.TrimSpace(title)))
+
+	// Check for specific LinkedIn indicators
+	indicators := []string{"linkedin.com/jobs", "job search", "job results", "jobs found", "no jobs", "search results"}
+	pageText := strings.ToLower(doc.Text())
+	for _, indicator := range indicators {
+		if strings.Contains(pageText, indicator) {
+			analysis.WriteString(fmt.Sprintf("🔍 Found indicator: '%s'\n", indicator))
+		}
+	}
+
+	// Check for error/blocking messages
+	errorKeywords := []string{"blocked", "captcha", "verification", "error", "access denied", "sign in", "login", "please try again"}
+	for _, keyword := range errorKeywords {
+		if strings.Contains(pageText, keyword) {
+			analysis.WriteString(fmt.Sprintf("⚠️  Found warning keyword: '%s'\n", keyword))
+		}
+	}
+
+	// Count total elements for context
+	totalElements := doc.Find("*").Length()
+	analysis.WriteString(fmt.Sprintf("📊 Total page elements: %d\n", totalElements))
+
+	return analysis.String()
 }
 
 // normalizeURL normalizes LinkedIn URLs
@@ -263,10 +538,10 @@ func (s *LinkedInScraper) CheckIndonesianEmployees(companyURL string) (bool, []E
 	var allEmployees []Employee
 
 	for i, approach := range approaches {
-		log.Printf("Trying approach %d for employee detection", i+1)
+		s.debugLog("Trying approach %d for employee detection", i+1)
 		employees, err := approach(companyURL)
 		if err != nil {
-			log.Printf("Approach %d failed: %v", i+1, err)
+			s.debugLog("Approach %d failed: %v", i+1, err)
 			continue
 		}
 
@@ -283,7 +558,7 @@ func (s *LinkedInScraper) CheckIndonesianEmployees(companyURL string) (bool, []E
 	duration := time.Since(startTime)
 	hasIndonesian := len(allEmployees) > 0
 
-	log.Printf("Employee check completed in %v, found %d Indonesian employees", duration, len(allEmployees))
+	s.debugLog("Employee check completed in %v, found %d Indonesian employees", duration, len(allEmployees))
 
 	return hasIndonesian, allEmployees, nil
 }
@@ -532,6 +807,9 @@ func (s *LinkedInScraper) extractCompanyName(companyURL string) string {
 	return ""
 }
 
+// ================================
+// ORIGINAL FUNCTION: ProcessJobs
+// ================================
 // ProcessJobs processes all jobs and checks for Indonesian employees with progress tracking
 func (s *LinkedInScraper) ProcessJobs(jobs []Job) []Job {
 	var processedJobs []Job
@@ -576,6 +854,64 @@ func (s *LinkedInScraper) ProcessJobs(jobs []Job) []Job {
 	return processedJobs
 }
 
+// ========================================
+// NEW ENHANCED FUNCTION: ProcessJobsWithFallback
+// ========================================
+// ProcessJobsWithFallback processes jobs with Indonesian detection but ALWAYS returns results
+func (s *LinkedInScraper) ProcessJobsWithFallback(jobs []Job) []Job {
+	var processedJobs []Job
+	totalJobs := len(jobs)
+	indonesianJobs := 0
+
+	log.Printf("🔄 Processing %d jobs for Indonesian employee detection...", totalJobs)
+	log.Printf("💡 Strategy: ALL jobs will be returned (prioritized by Indonesian employees)")
+
+	for i, job := range jobs {
+		log.Printf("[%d/%d] Processing: %s at %s", i+1, totalJobs, job.Title, job.Company)
+
+		startTime := time.Now()
+		hasIndonesian, employees, err := s.CheckIndonesianEmployees(job.CompanyURL)
+		duration := time.Since(startTime)
+
+		job.CheckDuration = duration.String()
+		job.EmployeeCount = len(employees)
+
+		if err != nil {
+			s.debugLog("Error checking employees for %s: %v", job.Company, err)
+			job.HasIndonesian = false
+			job.IndonesianEmployees = []Employee{}
+		} else {
+			job.HasIndonesian = hasIndonesian
+			job.IndonesianEmployees = employees
+
+			if hasIndonesian {
+				indonesianJobs++
+				log.Printf("✅ Found %d Indonesian employees at %s", len(employees), job.Company)
+			} else {
+				log.Printf("➖ No Indonesian employees found at %s (still adding to results)", job.Company)
+			}
+		}
+
+		// ALWAYS add the job to results, regardless of Indonesian employees
+		processedJobs = append(processedJobs, job)
+
+		// Progress indicator
+		progress := float64(i+1) / float64(totalJobs) * 100
+		log.Printf("Progress: %.1f%% (%d/%d)", progress, i+1, totalJobs)
+
+		time.Sleep(s.delay)
+	}
+
+	// Enhanced summary log
+	log.Printf("\n📊 PROCESSING SUMMARY:")
+	log.Printf("   Total Jobs Processed: %d", totalJobs)
+	log.Printf("   🎯 Jobs with Indonesian Employees: %d", indonesianJobs)
+	log.Printf("   💼 Jobs without Indonesian Employees: %d", totalJobs-indonesianJobs)
+	log.Printf("   ✅ All jobs included in results for your review!")
+
+	return processedJobs
+}
+
 // SaveResults saves the results to a JSON file with better formatting
 func SaveResults(jobs []Job, filename string) error {
 	// Create a summary
@@ -606,7 +942,9 @@ func SaveResults(jobs []Job, filename string) error {
 	return os.WriteFile(filename, data, 0644)
 }
 
-// printResults prints the results in a formatted way with enhanced output
+// ================================
+// ORIGINAL FUNCTION: printResults
+// ================================
 func printResults(jobs []Job) {
 	fmt.Println("\n" + strings.Repeat("=", 100))
 	fmt.Println("🇮🇩 LINKEDIN JOB SEARCH RESULTS WITH INDONESIAN EMPLOYEE DETECTION")
@@ -685,11 +1023,164 @@ func printResults(jobs []Job) {
 	}
 }
 
+// ==========================================
+// NEW ENHANCED FUNCTION: printResultsEnhanced
+// ==========================================
+func printResultsEnhanced(jobs []Job) {
+	fmt.Println("\n" + strings.Repeat("=", 100))
+	fmt.Println("🇮🇩 ENHANCED LINKEDIN JOB SEARCH RESULTS WITH SMART PRIORITIZATION")
+	fmt.Println(strings.Repeat("=", 100))
+
+	totalJobs := len(jobs)
+	jobsWithIndonesians := 0
+	jobsWithoutIndonesians := 0
+	totalIndonesianEmployees := 0
+
+	for _, job := range jobs {
+		if job.HasIndonesian {
+			jobsWithIndonesians++
+			totalIndonesianEmployees += len(job.IndonesianEmployees)
+		} else {
+			jobsWithoutIndonesians++
+		}
+	}
+
+	fmt.Printf("📊 ENHANCED SUMMARY:\n")
+	fmt.Printf("   Total Jobs Found: %d\n", totalJobs)
+	fmt.Printf("   🎯 PRIORITY Jobs (Indonesian Employees): %d (%.1f%%) - APPLY FIRST!\n",
+		jobsWithIndonesians, float64(jobsWithIndonesians)/float64(totalJobs)*100)
+	fmt.Printf("   💼 ALTERNATIVE Jobs (No Indonesian Detected): %d (%.1f%%) - BACKUP OPTIONS\n",
+		jobsWithoutIndonesians, float64(jobsWithoutIndonesians)/float64(totalJobs)*100)
+	fmt.Printf("   👥 Total Indonesian Employees Found: %d\n", totalIndonesianEmployees)
+
+	// Sort jobs: Indonesian employees first, then others
+	sortedJobs := make([]Job, len(jobs))
+	copy(sortedJobs, jobs)
+
+	for i := 0; i < len(sortedJobs)-1; i++ {
+		for j := i + 1; j < len(sortedJobs); j++ {
+			if !sortedJobs[i].HasIndonesian && sortedJobs[j].HasIndonesian {
+				sortedJobs[i], sortedJobs[j] = sortedJobs[j], sortedJobs[i]
+			}
+		}
+	}
+
+	// Print PRIORITY jobs with Indonesian employees first
+	if jobsWithIndonesians > 0 {
+		fmt.Println("\n" + strings.Repeat("=", 80))
+		fmt.Println("🎯 PRIORITY JOBS - COMPANIES WITH INDONESIAN EMPLOYEES")
+		fmt.Println(strings.Repeat("=", 80))
+		fmt.Println("💡 Apply to these first! You can network with Indonesian colleagues.")
+
+		priorityCount := 0
+		for _, job := range sortedJobs {
+			if job.HasIndonesian {
+				priorityCount++
+				fmt.Printf("\n🌟 PRIORITY #%d: %s\n", priorityCount, job.Title)
+				fmt.Printf("   🏢 Company: %s\n", job.Company)
+				fmt.Printf("   📍 Location: %s\n", job.Location)
+				fmt.Printf("   🔗 Job URL: %s\n", job.JobURL)
+				fmt.Printf("   🇮🇩 Indonesian Employees Found: %d\n", len(job.IndonesianEmployees))
+
+				if len(job.IndonesianEmployees) > 0 {
+					fmt.Printf("   👥 Indonesian Staff (for networking):\n")
+					for _, emp := range job.IndonesianEmployees {
+						confidenceStr := fmt.Sprintf("%.0f%%", emp.Confidence*100)
+						fmt.Printf("      • %s", emp.Name)
+						if emp.Position != "" {
+							fmt.Printf(" (%s)", emp.Position)
+						}
+						fmt.Printf(" [Match Confidence: %s]\n", confidenceStr)
+					}
+				}
+
+				fmt.Printf("   ⭐ STRATEGY: Mention Indonesian connection in your application!\n")
+				fmt.Printf("   ⏱️  Detection Time: %s\n", job.CheckDuration)
+				fmt.Println(strings.Repeat("-", 60))
+			}
+		}
+	}
+
+	// Print ALTERNATIVE jobs (without detected Indonesian employees)
+	if jobsWithoutIndonesians > 0 {
+		fmt.Println("\n" + strings.Repeat("=", 80))
+		fmt.Println("💼 ALTERNATIVE JOBS - STILL EXCELLENT OPPORTUNITIES")
+		fmt.Println(strings.Repeat("=", 80))
+		fmt.Println("ℹ️  No Indonesian employees detected, but these are still great opportunities!")
+		fmt.Println("💡 Indonesian employees may exist but weren't found in our search.")
+
+		altCount := 0
+		for _, job := range sortedJobs {
+			if !job.HasIndonesian {
+				altCount++
+				fmt.Printf("\n💼 ALTERNATIVE #%d: %s\n", altCount, job.Title)
+				fmt.Printf("   🏢 Company: %s\n", job.Company)
+				fmt.Printf("   📍 Location: %s\n", job.Location)
+				fmt.Printf("   🔗 Job URL: %s\n", job.JobURL)
+				fmt.Printf("   🔍 Indonesian Check: No employees detected in our search\n")
+				fmt.Printf("   💡 TIP: Research company manually or apply with standard approach\n")
+				fmt.Printf("   🚀 OPPORTUNITY: Could be the first Indonesian employee!\n")
+				fmt.Printf("   ⏱️  Detection Time: %s\n", job.CheckDuration)
+				fmt.Println(strings.Repeat("-", 60))
+			}
+		}
+
+		fmt.Println("\n💡 WHY ALTERNATIVE JOBS ARE STILL VALUABLE:")
+		fmt.Println("   • Indonesian employees might exist but use different names")
+		fmt.Println("   • Company may be open to hiring Indonesian employees")
+		fmt.Println("   • Great opportunity to be a pioneer and build Indonesian community")
+		fmt.Println("   • Still excellent career opportunities regardless of employee demographics")
+	}
+
+	// Final strategic recommendations
+	fmt.Println("\n" + strings.Repeat("=", 80))
+	fmt.Println("📋 STRATEGIC ACTION PLAN")
+	fmt.Println(strings.Repeat("=", 80))
+
+	if jobsWithIndonesians > 0 {
+		fmt.Printf("1. 🎯 IMMEDIATE ACTION: Apply to %d PRIORITY jobs with Indonesian employees\n", jobsWithIndonesians)
+		fmt.Println("   → Mention Indonesian connection in your cover letter")
+		fmt.Println("   → Reach out to Indonesian employees for referrals")
+		fmt.Println("   → Use Indonesian community networks")
+		fmt.Println("")
+	}
+
+	if jobsWithoutIndonesians > 0 {
+		fmt.Printf("2. 💼 BACKUP STRATEGY: Consider %d ALTERNATIVE jobs as excellent options\n", jobsWithoutIndonesians)
+		fmt.Println("   → Research companies thoroughly")
+		fmt.Println("   → Apply with standard professional approach")
+		fmt.Println("   → Could be opportunity to build Indonesian presence")
+		fmt.Println("")
+	}
+
+	fmt.Println("3. 🔄 EXPAND SEARCH: Try different keywords or locations for more opportunities")
+	fmt.Println("4. 📈 IMPROVE DATABASE: Report any Indonesian names we missed to enhance detection")
+	fmt.Println("5. 🌐 NETWORK: Use Indonesian professional communities for additional opportunities")
+
+	fmt.Printf("\n📊 SUCCESS METRICS: You now have %d total opportunities with clear prioritization!\n", totalJobs)
+}
+
 func main() {
 	if len(os.Args) < 3 {
+		fmt.Println("🇮🇩 Enhanced LinkedIn Indonesian Employee Job Scraper v2.0")
+		fmt.Println("===========================================================")
 		fmt.Println("Usage: go run main.go <country> <job_title> [limit]")
-		fmt.Println("Example: go run main.go \"Germany\" \"golang developer\" 50")
-		fmt.Println("Default limit: 25 jobs")
+		fmt.Println("Example: go run main.go \"Germany\" \"software engineer\" 25")
+		fmt.Println("")
+		fmt.Println("🆕 ENHANCED FEATURES:")
+		fmt.Println("✅ ALWAYS returns ALL jobs found (no more empty results!)")
+		fmt.Println("🎯 PRIORITIZES jobs with Indonesian employees")
+		fmt.Println("💼 SHOWS alternative jobs as backup options")
+		fmt.Println("📊 CLEAR action plan and strategic recommendations")
+		fmt.Println("🔍 ENHANCED job search with multiple fallback strategies")
+		fmt.Println("🛡️  IMPROVED LinkedIn blocking detection and avoidance")
+		fmt.Println("")
+		fmt.Println("🐛 DEBUG MODE:")
+		fmt.Println("DEBUG=true go run main.go \"Germany\" \"software engineer\" 5")
+		fmt.Println("")
+		fmt.Println("💡 STRATEGY MODES:")
+		fmt.Println("• Enhanced strategy (default): Always returns results with prioritization")
+		fmt.Println("• Original strategy: Set useEnhancedStrategy = false in code")
 		os.Exit(1)
 	}
 
@@ -701,46 +1192,107 @@ func main() {
 		fmt.Sscanf(os.Args[3], "%d", &limit)
 	}
 
+	// Strategy selection - you can change this
+	useEnhancedStrategy := true // Set to false for original behavior
+
+	fmt.Println("🇮🇩 Enhanced LinkedIn Indonesian Employee Job Scraper")
+	fmt.Println("====================================================")
 	fmt.Printf("🔍 Searching for '%s' jobs in %s (limit: %d)...\n", jobTitle, country, limit)
-	fmt.Println("🇮🇩 Will efficiently check for Indonesian employees at each company")
+
+	if useEnhancedStrategy {
+		fmt.Println("🎯 ENHANCED STRATEGY: Find jobs with Indonesian employees + show alternatives")
+	} else {
+		fmt.Println("🔍 ORIGINAL STRATEGY: Indonesian employee detection only")
+	}
+
+	if os.Getenv("DEBUG") == "true" || os.Getenv("SCRAPER_DEBUG") == "true" {
+		fmt.Println("🐛 DEBUG MODE ENABLED - Detailed logging activated")
+	}
 
 	scraper, err := NewLinkedInScraper()
 	if err != nil {
 		log.Fatalf("Failed to initialize scraper: %v", err)
 	}
 
-	// Search for jobs
+	// Search for jobs with enhanced fallback strategies
 	jobs, err := scraper.SearchJobs(country, jobTitle, limit)
 	if err != nil {
 		log.Fatalf("Failed to search jobs: %v", err)
 	}
 
 	if len(jobs) == 0 {
-		fmt.Println("❌ No jobs found. Try different search terms or check if LinkedIn is accessible.")
+		fmt.Println("❌ No jobs found with current search terms.")
+		fmt.Println("\n🔧 ENHANCED TROUBLESHOOTING SUGGESTIONS:")
+		fmt.Println("1. 🎯 Try broader search terms:")
+		fmt.Println("   • 'software engineer' instead of 'golang developer'")
+		fmt.Println("   • 'developer' instead of specific technologies")
+		fmt.Println("   • 'programmer' or 'engineer' for wider results")
+		fmt.Println("")
+		fmt.Println("2. 🗺️  Try specific locations:")
+		fmt.Println("   • 'Berlin, Germany' instead of 'Germany'")
+		fmt.Println("   • 'Amsterdam, Netherlands'")
+		fmt.Println("   • 'London, United Kingdom'")
+		fmt.Println("")
+		fmt.Println("3. 🛡️  LinkedIn may be rate limiting:")
+		fmt.Println("   • Try using a VPN (different location)")
+		fmt.Println("   • Wait 30-60 minutes and retry")
+		fmt.Println("   • Use DEBUG=true for detailed diagnostics")
+		fmt.Println("")
+		fmt.Println("4. 🐛 Enable debug mode for detailed analysis:")
+		fmt.Println("   DEBUG=true go run main.go \"Germany\" \"software engineer\" 5")
+		fmt.Println("")
+		fmt.Println("5. 📊 Check debug output:")
+		fmt.Println("   • Debug HTML files will be saved for analysis")
+		fmt.Println("   • Page structure analysis will show what LinkedIn returned")
+		fmt.Println("   • Response status codes will indicate blocking")
 		return
 	}
 
-	fmt.Printf("✅ Found %d jobs, now checking for Indonesian employees using efficient lookup...\n", len(jobs))
+	fmt.Printf("✅ Found %d jobs! Now checking for Indonesian employees...\n", len(jobs))
 
-	// Process jobs to check for Indonesian employees
-	processedJobs := scraper.ProcessJobs(jobs)
+	if useEnhancedStrategy {
+		fmt.Println("💡 Enhanced Strategy: ALL jobs will be included in results")
+		// Use enhanced strategy - always returns results
+		processedJobs := scraper.ProcessJobsWithFallback(jobs)
+		printResultsEnhanced(processedJobs)
 
-	// Print results
-	printResults(processedJobs)
+		// Save results
+		timestamp := time.Now().Format("20060102_150405")
+		filename := fmt.Sprintf("linkedin_jobs_enhanced_%s_%s_%s.json",
+			strings.ReplaceAll(strings.ToLower(country), " ", "_"),
+			strings.ReplaceAll(strings.ToLower(jobTitle), " ", "_"),
+			timestamp)
 
-	// Save to JSON file
-	timestamp := time.Now().Format("20060102_150405")
-	filename := fmt.Sprintf("linkedin_jobs_%s_%s_%s.json",
-		strings.ReplaceAll(strings.ToLower(country), " ", "_"),
-		strings.ReplaceAll(strings.ToLower(jobTitle), " ", "_"),
-		timestamp)
+		if err := SaveResults(processedJobs, filename); err != nil {
+			log.Printf("❌ Failed to save results: %v", err)
+		} else {
+			fmt.Printf("\n💾 Enhanced results saved to: %s\n", filename)
+		}
 
-	if err := SaveResults(processedJobs, filename); err != nil {
-		log.Printf("❌ Failed to save results: %v", err)
+		fmt.Println("\n✅ Enhanced job search completed!")
+		fmt.Println("📊 Review both PRIORITY jobs (with Indonesian employees) and ALTERNATIVES")
+
 	} else {
-		fmt.Printf("\n💾 Results saved to: %s\n", filename)
+		fmt.Println("💡 Original Strategy: Indonesian employee focused results")
+		// Use original strategy
+		processedJobs := scraper.ProcessJobs(jobs)
+		printResults(processedJobs)
+
+		// Save results
+		timestamp := time.Now().Format("20060102_150405")
+		filename := fmt.Sprintf("linkedin_jobs_%s_%s_%s.json",
+			strings.ReplaceAll(strings.ToLower(country), " ", "_"),
+			strings.ReplaceAll(strings.ToLower(jobTitle), " ", "_"),
+			timestamp)
+
+		if err := SaveResults(processedJobs, filename); err != nil {
+			log.Printf("❌ Failed to save results: %v", err)
+		} else {
+			fmt.Printf("\n💾 Results saved to: %s\n", filename)
+		}
+
+		fmt.Println("\n✅ Job search completed!")
 	}
 
-	fmt.Println("\n✅ Job search completed!")
 	fmt.Println("📈 Use the JSON file for further analysis or integration with other tools.")
 }

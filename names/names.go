@@ -2,13 +2,10 @@ package names
 
 import (
 	"bufio"
-	"embed"
+	"os"
 	"strings"
 	"unicode"
 )
-
-//go:embed data/*.txt
-var nameFiles embed.FS
 
 // NameDB represents the Indonesian names database with efficient lookup
 type NameDB struct {
@@ -50,14 +47,15 @@ func NewNameDB() (*NameDB, error) {
 	return db, nil
 }
 
-// loadNamesFromFile loads names from embedded file into the target map
+// loadNamesFromFile loads names from file into the target map
 func (db *NameDB) loadNamesFromFile(filename string, target map[string]bool) error {
-	data, err := nameFiles.ReadFile(filename)
+	file, err := os.Open(filename)
 	if err != nil {
 		return err
 	}
+	defer file.Close()
 
-	scanner := bufio.NewScanner(strings.NewReader(string(data)))
+	scanner := bufio.NewScanner(file)
 	for scanner.Scan() {
 		line := strings.TrimSpace(scanner.Text())
 		if line != "" && !strings.HasPrefix(line, "#") {
