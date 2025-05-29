@@ -148,18 +148,18 @@ func (s *LinkedInScraper) SearchJobs(country, jobTitle string, limit int) ([]Job
 	for len(allJobs) < limit {
 		// Try multiple parameter combinations for better success rate
 		paramSets := []url.Values{
+			// Without time restriction (more results) - PRIMARY APPROACH
+			{
+				"keywords": {jobTitle},
+				"location": {country},
+				"start":    {fmt.Sprintf("%d", start)},
+				"sortBy":   {"R"},
+			},
 			// Original parameters with time filter
 			{
 				"keywords": {jobTitle},
 				"location": {country},
 				"f_TPR":    {"r604800"}, // Last week
-				"start":    {fmt.Sprintf("%d", start)},
-				"sortBy":   {"R"},
-			},
-			// Without time restriction (more results)
-			{
-				"keywords": {jobTitle},
-				"location": {country},
 				"start":    {fmt.Sprintf("%d", start)},
 				"sortBy":   {"R"},
 			},
@@ -260,38 +260,36 @@ func (s *LinkedInScraper) SearchJobs(country, jobTitle string, limit int) ([]Job
 	return allJobs, nil
 }
 
-// extractJobsFromDocument extracts job listings with comprehensive selector fallbacks
+// extractJobsFromDocument extracts job listings with current LinkedIn selectors (2025)
 func (s *LinkedInScraper) extractJobsFromDocument(doc *goquery.Document) []Job {
 	var jobs []Job
 
-	// Comprehensive list of selectors for different LinkedIn page versions
+	// UPDATED: Current LinkedIn selectors as of 2025
+	// Based on LinkedIn's current page structure
 	selectors := []string{
-		// Current known selectors
+		// Primary current selectors (2025)
+		".jobs-search-results-list .jobs-search-results__list-item",
+		".jobs-search-results__list-item",
+		".scaffold-layout__list-item",
+		".artdeco-list__item",
+		"[data-entity-urn*='jobPosting']",
+		"[data-occludable-job-id]",
+
+		// Secondary current selectors
+		".job-card-container",
+		".job-card-list__entity-lockup",
+		".entity-result",
+		".search-result",
+		"[data-job-id]",
+
+		// Backup selectors for different page layouts
+		".base-search-card",
 		".job-search-card",
 		".jobs-search__results-list li",
-		"[data-entity-urn*='jobPosting']",
 		".job-result-card",
 		".base-card",
 		"li[data-occludable-job-id]",
 		".scaffold-layout__list-container li",
-
-		// Additional selectors for newer LinkedIn versions
-		".jobs-search-results__list-item",
-		".job-card-container",
-		".job-card-search",
-		"[data-job-id]",
-		"[data-tracking-control-name='job_search_job_result']",
-		".artdeco-entity-lockup",
-		".job-card-square",
-		".jobs-search__job-card",
-		".jobs-unified-top-card",
-		".job-search-result-card",
-
-		// LinkedIn mobile/responsive selectors
-		".jobs-search-box",
-		".jobs-search-results-list",
-		".job-card",
-		".job-result",
 
 		// Generic fallbacks
 		"article",
@@ -301,6 +299,8 @@ func (s *LinkedInScraper) extractJobsFromDocument(doc *goquery.Document) []Job {
 		"div[class*='job']",
 		"li[class*='job']",
 		"[class*='search-result']",
+		"li[class*='entity']",
+		".entity-lockup",
 	}
 
 	s.debugLog("Trying %d different selectors for job extraction", len(selectors))
@@ -341,31 +341,34 @@ func (s *LinkedInScraper) extractJobsFromDocument(doc *goquery.Document) []Job {
 	return jobs
 }
 
-// extractJobFromElement extracts job details from a single element with enhanced selectors
+// extractJobFromElement extracts job details with current LinkedIn selectors (2025)
 func (s *LinkedInScraper) extractJobFromElement(sel *goquery.Selection) Job {
 	job := Job{}
 
-	// Comprehensive title selectors for different LinkedIn layouts
+	// UPDATED: Current LinkedIn title selectors (2025)
 	titleSelectors := []string{
+		// Primary current selectors
+		".job-card-list__title a",
+		".job-card-container__link",
+		".artdeco-entity-lockup__title a",
+		".entity-result__title-text a",
 		".base-search-card__title a",
+		"[data-control-name='job_search_job_result_title']",
+
+		// Secondary selectors
 		".job-result-card__title a",
 		"h3 a",
 		"h2 a",
-		"h1 a",
-		"[data-control-name='job_search_job_result_title']",
-		"[data-tracking-control-name='job_search_job_result_title']",
 		".job-search-card__title a",
 		"a[data-control-name='job_search_job_result_title']",
-		".job-card-container__link",
 		".job-card__title a",
-		".artdeco-entity-lockup__title a",
 		".job-title a",
-		"[aria-label*='job']",
 		".jobs-unified-top-card__job-title a",
-		".job-card-container__title a",
-		".job-search-result-card__title a",
-		".jobs-search-box__title a",
+		"[aria-label*='job']",
+
+		// Generic fallbacks
 		"a[href*='/jobs/view/']",
+		"a[href*='/jobs/collections/']",
 	}
 
 	for _, titleSel := range titleSelectors {
@@ -383,24 +386,29 @@ func (s *LinkedInScraper) extractJobFromElement(sel *goquery.Selection) Job {
 		}
 	}
 
-	// Comprehensive company selectors
+	// UPDATED: Current LinkedIn company selectors (2025)
 	companySelectors := []string{
+		// Primary current selectors
+		".job-card-container__primary-description",
+		".artdeco-entity-lockup__subtitle a",
+		".entity-result__primary-subtitle a",
+		".base-search-card__subtitle a",
+		"[data-control-name='job_search_company_name']",
+
+		// Secondary selectors
 		".hidden-nested-link",
 		".job-result-card__subtitle a",
 		"h4 a",
-		"[data-control-name='job_search_company_name']",
-		"[data-tracking-control-name='job_search_company_name']",
 		".job-search-card__subtitle a",
 		"a[data-control-name='job_search_company_name']",
-		".job-card-container__company-name a",
 		".job-card__subtitle a",
-		".artdeco-entity-lockup__subtitle a",
 		".company-name a",
 		".jobs-unified-top-card__company-name a",
 		".job-result-card__subtitle-link",
-		".job-card-container__subtitle a",
-		".job-search-result-card__subtitle a",
+
+		// Generic fallbacks
 		"a[href*='/company/']",
+		"a[href*='/school/']",
 	}
 
 	for _, companySel := range companySelectors {
@@ -418,20 +426,27 @@ func (s *LinkedInScraper) extractJobFromElement(sel *goquery.Selection) Job {
 		}
 	}
 
-	// Comprehensive location selectors
+	// UPDATED: Current LinkedIn location selectors (2025)
 	locationSelectors := []string{
-		".job-search-card__location",
+		// Primary current selectors
+		".job-card-container__metadata-wrapper",
+		".artdeco-entity-lockup__caption",
+		".entity-result__secondary-subtitle",
+		".base-search-card__metadata",
 		".job-result-card__location",
+
+		// Secondary selectors
+		".job-search-card__location",
 		"[data-test='job-location']",
 		".job-search-card__location span",
-		".job-card-container__metadata",
 		".job-card__location",
-		".artdeco-entity-lockup__caption",
 		".job-location",
 		".jobs-unified-top-card__bullet",
-		".job-card-container__location",
-		".job-search-result-card__location",
 		".location",
+
+		// Generic fallbacks that might contain location
+		".job-card-container__metadata",
+		".metadata",
 	}
 
 	for _, locSel := range locationSelectors {
